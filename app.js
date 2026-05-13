@@ -64,6 +64,53 @@ function parseEml(text) {
   };
 }
 
+// .msg ist ein binäres Format – wir scannen nach UTF-16LE Strings
+function parseMsg(buffer) {
+  const u8 = new Uint8Array(buffer);
+  const strings = [];
+  let current = '';
+
+  for (let i = 0; i < u8.length - 1; i++) {
+    if (u8[i + 1] === 0 && u8[i] >= 32 && u8[i] < 127) {
+      current += String.fromCharCode(u8[i]);
+      i++; // zweites Byte (0x00) überspringen
+    } else {
+      if (current.length >= 4) strings.push(current);
+      current = '';
+    }
+  }
+  if (current.length >= 4) strings.push(current);
+
+  // Heuristisch: E-Mail-Adresse = From, längerer Text = Subject / Body
+  let from    = '';
+  let subject = '';
+  let body    = '';
+
+  for (const s of strings) {
+    if (!from && s.includes('@') && s.length < 200) {
+      from = s;
+      continue;
+    }
+    if (!subject && s.length > 4 && s.length < 200
+        && !s.includes('@') && !/^[\d\s\-\/:\\]+$/.test(s)) {
+      subject = s;
+      continue;
+    }
+  }
+
+  // Längster sinnvoller String als Body-Kandidat
+  const bodyCandidate = strings
+    .filter(s => s.length > 30)
+    .sort((a, b) => b.length - a.length)[0] || '';
+  body = bodyCandidate.substring(0, 800);
+
+  return {
+    subject: subject || '(Kein Betreff)',
+    from:    from    || 'Unbekannt',
+    body,
+  };
+}
+
 // ─── Storage ─────────────────────────────────────────────────
 function persist() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.tickets));
@@ -249,7 +296,7 @@ function renderMain() {
             </div>` : `
             <div class="drop-placeholder">
               <div class="drop-icon">📧</div>
-              <div class="drop-label">E-Mail (.eml) hier hineinziehen</div>
+              <div class="drop-label">E-Mail (.eml / .msg) hier hineinziehen</div>
               <div class="drop-sub">Betreff & Inhalt werden automatisch übernommen</div>
             </div>`}
         </div>
@@ -311,16 +358,31 @@ function renderMain() {
     dz.addEventListener('drop', e => {
       e.preventDefault(); dz.classList.remove('drag-over');
       const file = e.dataTransfer.files[0];
-      if (!file?.name.endsWith('.eml')) { alert('Bitte eine .eml Datei verwenden.'); return; }
-      const rd = new FileReader();
-      rd.onload = ev => {
-        const p = parseEml(ev.target.result);
-        state.form.email = p;
-        state.form.title = p.subject;
-        state.form.desc  = `Von: ${p.from}\n\n${p.body}`;
-        render();
-      };
-      rd.readAsText(file);
+      const name = file?.name.toLowerCase() || '';
+      if (!name.endsWith('.eml') && !name.endsWith('.msg')) {
+        alert('Bitte eine .eml oder .msg Datei verwenden.'); return;
+      }
+      if (name.endsWith('.msg')) {
+        const rd = new FileReader();
+        rd.onload = ev => {
+          const p = parseMsg(ev.target.result);
+          state.form.email = p;
+          state.form.title = p.subject;
+          state.form.desc  = `Von: ${p.from}\n\n${p.body}`;
+          render();
+        };
+        rd.readAsArrayBuffer(file);
+      } else {
+        const rd = new FileReader();
+        rd.onload = ev => {
+          const p = parseEml(ev.target.result);
+          state.form.email = p;
+          state.form.title = p.subject;
+          state.form.desc  = `Von: ${p.from}\n\n${p.body}`;
+          render();
+        };
+        rd.readAsText(file);
+      }
     });
     return;
   }
