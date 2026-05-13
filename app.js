@@ -21,7 +21,7 @@ const state = {
   filterStatus:   'all',
   filterPriority: 'all',
   noteText:       '',
-  form: { title: '', desc: '', priority: 'medium', date: '', time: '', email: null },
+  form: { title: '', desc: '', priority: 'medium', date: '', time: '', email: null, emailContent: '' },
 };
 
 const notifTimers = {};
@@ -119,13 +119,20 @@ function persist() {
 function loadTickets() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) state.tickets = JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      state.tickets = Array.isArray(parsed) ? parsed.map(t => ({
+        ...t,
+        notes: Array.isArray(t.notes) ? t.notes : [],
+        emailContent: t.emailContent || '',
+      })) : [];
+    }
   } catch {}
 }
 
 // ─── Ticket-Operationen ──────────────────────────────────────
 function createTicket() {
-  const { title, desc, priority, date, time, email } = state.form;
+  const { title, desc, priority, date, time, email, emailContent } = state.form;
   if (!title.trim()) { alert('Bitte einen Titel eingeben.'); return; }
   const dueDate = date ? new Date(`${date}T${time || '09:00'}`).toISOString() : null;
   const ticket = {
@@ -138,10 +145,11 @@ function createTicket() {
     createdAt: new Date().toISOString(),
     notes:     [],
     email,
+    emailContent: emailContent || '',
   };
   state.tickets.unshift(ticket);
   persist();
-  state.form = { title: '', desc: '', priority: 'medium', date: '', time: '', email: null };
+  state.form = { title: '', desc: '', priority: 'medium', date: '', time: '', email: null, emailContent: '' };
   state.selectedId = ticket.id;
   state.view = 'detail';
   render();
@@ -159,6 +167,26 @@ function addNote(ticketId, text) {
   t.notes.push({ id: Date.now().toString(), text: text.trim(), at: new Date().toISOString() });
   persist();
   state.noteText = '';
+  render();
+}
+
+function extendDueDate(ticketId, newDate, newTime, reason) {
+  const t = state.tickets.find(x => x.id === ticketId);
+  if (!t || !t.dueDate) return;
+  const oldDue = new Date(t.dueDate);
+  const newDue = new Date(`${newDate}T${newTime || '09:00'}`);
+  if (Number.isNaN(newDue.getTime())) { alert('Bitte ein gültiges neues Fälligkeitsdatum setzen.'); return; }
+  if (newDue <= oldDue) { alert('Die neue Fälligkeit muss später als die aktuelle sein.'); return; }
+  if (!reason.trim()) { alert('Bitte eine Begründung für die Verlängerung eingeben.'); return; }
+
+  t.dueDate = newDue.toISOString();
+  const changedAtIso = new Date().toISOString();
+  t.notes.push({
+    id: Date.now().toString(),
+    text: `⏳ Fälligkeit verlängert von ${fmt(oldDue.toISOString())} auf ${fmt(t.dueDate)}.\nBegründung: ${reason.trim()}\nZeitpunkt: ${fmt(changedAtIso)}`,
+    at: changedAtIso
+  });
+  persist();
   render();
 }
 
@@ -307,8 +335,13 @@ function renderMain() {
           </div>
           <div class="field">
             <label for="f-desc">Beschreibung</label>
-            <textarea id="f-desc" rows="4" placeholder="Beschreibung...">${esc(f.desc)}</textarea>
+            <textarea id="f-desc" rows="4" placeholder="Individuelle Beschreibung...">${esc(f.desc)}</textarea>
           </div>
+          ${f.emailContent ? `
+            <div class="field">
+              <label for="f-email-content">E-Mail Inhalt (automatisch übernommen)</label>
+              <textarea id="f-email-content" rows="6" readonly>${esc(f.emailContent)}</textarea>
+            </div>` : ''}
           <div class="field-row">
             <div class="field">
               <label for="f-priority">Priorität</label>
@@ -349,7 +382,7 @@ function renderMain() {
       state.view = state.selectedId ? 'detail' : 'empty'; render();
     });
     document.getElementById('btn-clear-email')?.addEventListener('click', () => {
-      state.form = { ...state.form, email: null, title: '', desc: '' }; render();
+      state.form = { ...state.form, email: null, title: '', emailContent: '' }; render();
     });
 
     const dz = document.getElementById('drop-zone');
@@ -368,7 +401,7 @@ function renderMain() {
           const p = parseMsg(ev.target.result);
           state.form.email = p;
           state.form.title = p.subject;
-          state.form.desc  = `Von: ${p.from}\n\n${p.body}`;
+          state.form.emailContent  = `Von: ${p.from}\n\n${p.body}`;
           render();
         };
         rd.readAsArrayBuffer(file);
@@ -378,7 +411,7 @@ function renderMain() {
           const p = parseEml(ev.target.result);
           state.form.email = p;
           state.form.title = p.subject;
-          state.form.desc  = `Von: ${p.from}\n\n${p.body}`;
+          state.form.emailContent  = `Von: ${p.from}\n\n${p.body}`;
           render();
         };
         rd.readAsText(file);
@@ -393,6 +426,9 @@ function renderMain() {
     if (!t) { state.view = 'empty'; render(); return; }
 
     const due = dueInfo(t.dueDate, t.status);
+    const dueDateObj = t.dueDate ? new Date(t.dueDate) : null;
+    const extendDateDefault = dueDateObj ? dueDateObj.toISOString().slice(0, 10) : '';
+    const extendTimeDefault = dueDateObj ? dueDateObj.toTimeString().slice(0, 5) : '';
     const statusOpts = Object.entries(STA)
       .map(([v, s]) => `<option value="${v}" ${t.status===v?'selected':''}>${s.label}</option>`)
       .join('');
@@ -418,8 +454,34 @@ function renderMain() {
         </div>
         ${t.desc ? `
           <div class="detail-section">
-            <div class="section-label">Beschreibung</div>
+            <div class="section-label">Individuelle Beschreibung</div>
             <div class="detail-desc">${esc(t.desc)}</div>
+          </div>` : ''}
+        ${t.emailContent ? `
+          <div class="detail-section">
+            <div class="section-label">E-Mail Inhalt (importiert)</div>
+            <div class="detail-desc">${esc(t.emailContent)}</div>
+          </div>` : ''}
+        ${t.dueDate ? `
+          <div class="detail-section">
+            <div class="section-label">Fälligkeit verlängern (mit Pflicht-Begründung)</div>
+            <div class="field-row">
+              <div class="field">
+                <label for="extend-date">Neues Datum</label>
+                <input id="extend-date" type="date" value="${esc(extendDateDefault)}">
+              </div>
+              <div class="field">
+                <label for="extend-time">Neue Uhrzeit</label>
+                <input id="extend-time" type="time" value="${esc(extendTimeDefault)}">
+              </div>
+            </div>
+            <div class="field" style="margin-top:10px;">
+              <label for="extend-reason">Begründung *</label>
+              <textarea id="extend-reason" rows="3" placeholder="Warum wird die Fälligkeit verlängert?"></textarea>
+            </div>
+            <div class="form-actions">
+              <button id="btn-extend-due" class="btn-secondary">Fälligkeit verlängern</button>
+            </div>
           </div>` : ''}
         <div class="detail-section notes-section">
           <div class="section-label">
@@ -445,6 +507,12 @@ function renderMain() {
     document.getElementById('btn-add-note').addEventListener('click', () =>
       addNote(t.id, state.noteText)
     );
+    document.getElementById('btn-extend-due')?.addEventListener('click', () => {
+      const nd = document.getElementById('extend-date').value;
+      const nt = document.getElementById('extend-time').value;
+      const rs = document.getElementById('extend-reason').value;
+      extendDueDate(t.id, nd, nt, rs);
+    });
   }
 }
 
